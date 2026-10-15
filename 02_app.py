@@ -3,7 +3,7 @@ import warnings
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
-from pymilvus import connections, Collection
+from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
 
 warnings.filterwarnings("ignore")
 
@@ -20,10 +20,73 @@ deepseek_client = OpenAI(
     base_url=os.getenv("DEEPSEEK_BASE_URL")
 )
 
-# 2. 连接 Milvus
-connections.connect(uri=r"D:\ai_zj_ku\zj_milvus.db")
-collection = Collection("qingdan_items")
-collection.load()
+# ========== 2. 自动建库 + 连接 Milvus ==========
+DB_URI = r'D:\ai_zj_ku\\zj_milvus.db'  # 绝对路径，云端本地都能用
+connections.connect(uri=DB_URI)
+
+collection_name = "qingdan_items"
+
+# 检查集合是否存在，且是否有数据
+if utility.has_collection(collection_name):
+    collection = Collection(collection_name)
+    collection.load()
+    need_build = collection.num_entities == 0
+else:
+    need_build = True
+
+if need_build:
+    st.info("首次启动，正在建库...")
+
+    fields = [
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=1024),
+        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=3000),
+        FieldSchema(name="item_code", dtype=DataType.VARCHAR, max_length=50),
+        FieldSchema(name="item_name", dtype=DataType.VARCHAR, max_length=100),
+        FieldSchema(name="calc_rule", dtype=DataType.VARCHAR, max_length=2000),
+    ]
+    schema = CollectionSchema(fields, description="清单项知识库")
+    collection = Collection(name=collection_name, schema=schema)
+
+    import csv
+    data_rows = []
+    with open("DE_1.csv", "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            data_rows.append(row)
+
+    insert_data = []
+    for row in data_rows:
+        full_text = (
+            f"项目编码: {row['项目编码']}\n"
+            f"项目名称: {row['项目名称']}\n"
+            f"项目特征: {row['项目特征']}\n"
+            f"计量单位: {row['计量单位']}\n"
+            f"工程量计算规则: {row['工程量计算规则']}\n"
+            f"工作内容: {row['工作内容']}"
+        )
+        response = ali_client.embeddings.create(
+            model="text-embedding-v4",
+            input=full_text
+        )
+        vector = response.data[0].embedding
+        insert_data.append({
+            "vector": vector,
+            "text": full_text,
+            "item_code": row["项目编码"],
+            "item_name": row["项目名称"],
+            "calc_rule": row["工程量计算规则"]
+        })
+
+    collection.insert(insert_data)
+    collection.flush()
+    collection.create_index(field_name="vector", index_params={
+        "index_type": "AUTOINDEX",
+        "metric_type": "COSINE",
+        "params": {}
+    })
+    collection.load()
+    st.success(f"建库完成，共 {collection.num_entities} 条数据")
 
 # 3. 系统提示词
 SYSTEM_PROMPT = """你是造价清单助手和日常聊天助手。
