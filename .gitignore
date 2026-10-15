@@ -1,0 +1,4 @@
+造价/.env
+../.venv/
+__pycache__/
+*.db
